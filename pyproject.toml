@@ -1,0 +1,13 @@
+[project]
+name = "simple-rag"
+version = "0.1.0"
+description = "Step-by-step RAG learning project"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "requests>=2.31",
+    "numpy>=1.26",
+]
+
+[project.scripts]
+simple-rag = "src.main:main"
