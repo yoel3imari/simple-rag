@@ -1,40 +1,60 @@
-import pickle
+from pathlib import Path
 
-import numpy as np
 import requests
 
-from src.config import METADATA_PATH, OLLAMA_BASE_URL, OLLAMA_GEN_MODEL, TOP_K, VECTORS_PATH
+import quiver_vector_db as quiver
+from quiver_vector_db import BM25
+
+from src.config import (
+    BM25_STATE_PATH,
+    HYBRID_DENSE_WEIGHT,
+    HYBRID_SPARSE_WEIGHT,
+    OLLAMA_BASE_URL,
+    OLLAMA_GEN_MODEL,
+    QUIVER_STORE_PATH,
+    TOP_K,
+    TOP_K_RERANK,
+)
 from src.embed import embed
+from src.rerank import rerank
 
 
 def query(question: str) -> tuple[str, str]:
-    if not VECTORS_PATH.exists() or not METADATA_PATH.exists():
+    if not QUIVER_STORE_PATH.exists():
         return "No vector store found. Run `ingest` first.", ""
 
-    # 1. Load vectors and metadata
-    index_vectors = np.load(str(VECTORS_PATH))
-    with open(METADATA_PATH, "rb") as f:
-        metadata: list[dict] = pickle.load(f)
+    # 1. Load Quiver collection and BM25 state
+    client = quiver.Client(path=str(QUIVER_STORE_PATH))
+    col = client.get_collection("docs")
+    bm25 = BM25.load(str(BM25_STATE_PATH))
 
     # 2. Embed question
     q_vec = embed(question)[0]
 
-    # 3. Normalize query vector for cosine similarity
-    q_vec_norm = q_vec.reshape(1, -1).astype(np.float32)
-    q_norm = np.linalg.norm(q_vec_norm)
-    q_vec_norm = q_vec_norm / q_norm
+    # 3. Hybrid search — fetch larger candidate pool for re-ranking
+    sparse_query = bm25.encode_query(question)
+    hits = col.search_hybrid(
+        dense_query=q_vec.tolist(),
+        sparse_query=sparse_query,
+        k=TOP_K_RERANK,
+        dense_weight=HYBRID_DENSE_WEIGHT,
+        sparse_weight=HYBRID_SPARSE_WEIGHT,
+    )
 
-    # 4. Search: cosine similarity via dot product on unit vectors
-    similarities = np.dot(index_vectors, q_vec_norm.T).flatten()
-    top_k_indices = np.argsort(similarities)[-TOP_K:][::-1]
-    top_k_scores = similarities[top_k_indices]
+    # 4. Cross-encoder re-ranking
+    texts = [hit["payload"]["text"] for hit in hits]
+    ce_scores = rerank(question, texts)
+    # Re-sort hits by cross-encoder score descending
+    ranked = sorted(zip(hits, ce_scores), key=lambda x: x[1], reverse=True)
+    hits = [h for h, _ in ranked[:TOP_K]]
+    scores = [s for _, s in ranked[:TOP_K]]
 
-    # 5. Build context
+    # 5. Build context from re-ranked results
     context_parts: list[str] = []
-    for score, idx in zip(top_k_scores, top_k_indices):
-        meta = metadata[idx] # TODO: what if metadata is empty
+    for score, hit in zip(scores, hits):
+        payload = hit["payload"]
         context_parts.append(
-            f"[{meta['source']}: chunk {meta['chunk_index']}] (score: {score:.4f})\n{meta['text']}"
+            f"[{payload['source']}: chunk {payload['chunk_index']}] (relevance: {score:.4f})\n{payload['text']}"
         )
 
     if not context_parts:
@@ -43,8 +63,7 @@ def query(question: str) -> tuple[str, str]:
     context_str = "\n\n".join(context_parts)
 
     # 6. Prompt
-    prompt = f"""You are a helpful assistant. Answer the question based ONLY on the provided context.
-If the context doesn't contain enough information to answer, say "I cannot answer based on the provided documents."
+    prompt = f"""You are a helpful assistant. Use the context below to answer the question.
 
 Context:
 {context_str}

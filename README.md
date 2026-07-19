@@ -5,9 +5,11 @@ Step-by-step RAG learning project. Start minimal, scale progressively.
 ## Stack
 
 - **Embeddings**: `nomic-embed-text` via Ollama (768d, no PyTorch)
-- **Vector store**: FAISS `IndexFlatIP` (cosine similarity, exact search, CPU)
+- **Vector search**: Quiver `FlatIndex` (cosine, AVX2-accelerated)
+- **Keyword search**: Quiver BM25 (hybrid fusion via weighted score)
+- **Re-ranker**: Cross-encoder `ms-marco-MiniLM-L-6-v2` via ONNX Runtime
 - **Generation**: `gemma3` via Ollama
-- **Chunking**: Fixed-size (512 chars, 64 overlap) — deliberately naive
+- **Chunking**: Recursive splitter with overlap (512 chars, 64 overlap)
 
 ## Prerequisites
 
@@ -49,15 +51,19 @@ python -m src.main query "What are the failure modes of RAG?"
 └────────┬─────────────────────────────┬───────────────┘
          │                             │
          ▼                             ▼
-┌─────────────────┐       ┌─────────────────────────┐
-│    ingest.py     │       │        query.py          │
-│                  │       │                          │
-│  read file       │       │  embed question          │
-│  chunk text      │       │  → FAISS search (top-k)  │
-│  embed chunks    │       │  → build prompt          │
-│  → FAISS index   │       │  → Ollama generate       │
-│  → metadata.pkl  │       │  → return answer         │
-└────────┬─────────┘       └────────┬─────────────────┘
+┌─────────────────┐       ┌─────────────────────────────────────┐
+│    ingest.py     │       │            query.py                  │
+│                  │       │                                      │
+│  read file       │       │  embed question                      │
+│  recursive split │       │  Quiver search_hybrid():             │
+│  embed chunks    │       │  ┌─ Cosine (FlatIndex)              │
+│  → Quiver col    │       │  ├─ BM25 keyword search             │
+│  → BM25 state    │       │  └─ Weighted fusion → top-k         │
+│                  │       │  → rerank.py (cross-encoder ONNX)    │
+│                  │       │  → build prompt                     │
+│                  │       │  → Ollama generate                   │
+│                  │       │  → return answer                     │
+└────────┬─────────┘       └────────┬────────────────────────────┘
          │                          │
          ▼                          ▼
 ┌──────────────────────────────────────────┐
@@ -68,8 +74,8 @@ python -m src.main query "What are the failure modes of RAG?"
          ▼                          ▼
 ┌──────────────────────────────────────────┐
 │              store/                       │
-│  index.faiss  │  metadata.pkl            │
-│  (FAISS IVF)  │  (chunk text + source)   │
+│  quiver/     │  bm25.json                │
+│  (collection)│  (BM25 state)             │
 └──────────────────────────────────────────┘
 ```
 
@@ -82,11 +88,12 @@ simple-rag/
 │   ├── config.py      # All tunable parameters
 │   ├── embed.py       # Ollama embedding client
 │   ├── ingest.py      # Document ingestion pipeline
-│   ├── query.py       # Retrieval + generation
+│   ├── query.py       # Retrieval + re-ranking + generation
+│   ├── rerank.py      # Cross-encoder re-ranker (ONNX)
 │   └── main.py        # CLI dispatcher
 ├── data/
 │   └── sample.txt     # Test document
-├── store/             # FAISS index + metadata (gitignored)
+├── store/             # Quiver collection + BM25 state (gitignored)
 ├── pyproject.toml
 └── README.md
 ```
@@ -95,10 +102,10 @@ simple-rag/
 
 | # | What | Why |
 |---|---|---|
-| v1 | ✅ Current: fixed chunks, FAISS, basic prompt | Baseline |
-| v2 | Recursive/semantic chunking | Fix broken context windows |
-| v3 | Hybrid search (FAISS + BM25) | Catch exact-match misses |
-| v4 | Re-ranking with cross-encoder | Sharper top-k ordering |
+| v1 | ✅ Fixed chunks, FAISS, basic prompt | Baseline |
+| v2 | ✅ Recursive/semantic chunking | Fix broken context windows |
+| v3 | ✅ Hybrid search (FAISS + BM25) | Catch exact-match misses |
+| v4 | ✅ Re-ranking with cross-encoder | Sharper top-k ordering |
 | v5 | Evaluation (hit rate, faithfulness) | Stop guessing if changes help |
 | v6 | Query rewriting / HyDE | Better retrieval for ambiguous queries |
 | v7 | Multi-document / PDF / web sources | Real-world ingestion |
