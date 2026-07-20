@@ -11,3 +11,5 @@ wheels/
 
 # Vector store
 store/
+data
+.sisyphus

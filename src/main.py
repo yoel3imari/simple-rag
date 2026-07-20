@@ -4,6 +4,62 @@ from src.ingest import ingest
 from src.query import query
 
 
+def add_eval_parser(subparsers):
+    from src.eval import run_eval, print_report
+
+    eval_parser = subparsers.add_parser("eval", help="Evaluate retrieval & generation quality")
+    eval_parser.add_argument(
+        "--no-rerank",
+        action="store_true",
+        help="Skip cross-encoder re-ranking",
+    )
+    eval_parser.add_argument(
+        "--no-bm25",
+        action="store_true",
+        help="Disable BM25 keyword search (dense-only hybrid)",
+    )
+    eval_parser.add_argument(
+        "--dense-only",
+        action="store_true",
+        help="Only dense vector search (no BM25, no rerank)",
+    )
+    eval_parser.add_argument(
+        "--faithfulness",
+        action="store_true",
+        help="Include faithfulness evaluation (extra LLM calls)",
+    )
+    eval_parser.add_argument(
+        "--transform",
+        choices=["none", "rewrite", "hyde", "hyde_fusion"],
+        default=None,
+        help="Query transformation mode (default: config QUERY_TRANSFORM_MODE)",
+    )
+    eval_parser.add_argument(
+        "--compare-transforms",
+        action="store_true",
+        help="Run eval across all transform modes and print a comparison table",
+    )
+
+
+def handle_eval(args):
+    from src.eval import run_eval, print_report, compare_transforms
+
+    if args.compare_transforms:
+        compare_transforms()
+        return
+
+    use_rerank = not args.no_rerank and not args.dense_only
+    use_bm25 = not args.no_bm25 and not args.dense_only
+
+    summary = run_eval(
+        use_rerank=use_rerank,
+        use_bm25=use_bm25,
+        faithfulness=args.faithfulness,
+        transform_mode=args.transform,
+    )
+    print_report(summary)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Simple RAG system")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -20,15 +76,26 @@ def main() -> None:
     # query subcommand
     query_parser = subparsers.add_parser("query", help="Ask a question")
     query_parser.add_argument("question", help="Your question")
+    query_parser.add_argument(
+        "--transform",
+        choices=["none", "rewrite", "hyde", "hyde_fusion"],
+        default=None,
+        help="Query transformation mode (default: config QUERY_TRANSFORM_MODE)",
+    )
+
+    # eval subcommand
+    add_eval_parser(subparsers)
 
     args = parser.parse_args()
 
     if args.command == "ingest":
         ingest(args.file, recreate=args.recreate)
     elif args.command == "query":
-        answer, sources = query(args.question)
+        answer, sources = query(args.question, transform_mode=args.transform)
         print(f"\n=== Answer ===\n{answer}")
         print(f"\n=== Sources ===\n{sources}")
+    elif args.command == "eval":
+        handle_eval(args)
 
 
 if __name__ == "__main__":

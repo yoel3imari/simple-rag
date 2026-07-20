@@ -35,3 +35,57 @@ BM25_B = 0.75
 # Cross-encoder re-ranker
 RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 TOP_K_RERANK = 10      # candidate pool size before re-ranking
+
+# Evaluation
+EVAL_QUERIES_PATH = DATA_DIR / "eval_queries.json"
+
+# ── Query transformation (v6) ──────────────────────────────
+
+# Transform mode: "none" | "rewrite" | "hyde" | "hyde_fusion"
+QUERY_TRANSFORM_MODE: str = "none"
+
+# Heuristic gating — skip transform for well-formed queries
+TRANSFORM_MIN_LENGTH: int = 5             # min words to consider "well-formed"
+TRANSFORM_MIN_ENTITIES: int = 1           # min named entities to consider "well-formed"
+
+# HyDE prompts (one per language, selected by query language)
+HYDE_PROMPT_EN: str = (
+    "Write a 4-sentence excerpt from a document that would directly answer the "
+    "question below. Use a confident, declarative tone — as if you are quoting "
+    "the source. Do not hedge or express uncertainty.\n\n"
+    "Question: {question}\n\nExcerpt:"
+)
+HYDE_PROMPT_AR: str = (
+    "اكتب مقتطفًا من 4 جمل من وثيقة تجيب مباشرة على السؤال أدناه. "
+    "استخدم نغمة واثقة وتقريرية — كما لو كنت تقتبس من المصدر. "
+    "لا تتردد أو تعبر عن عدم اليقين.\n\n"
+    "السؤال: {question}\n\nالمقتطف:"
+)
+HYDE_PROMPT_FR: str = (
+    "Rédigez un extrait de 4 phrases d'un document qui répondrait directement "
+    "à la question ci-dessous. Utilisez un ton confiant et déclaratif — comme "
+    "si vous citiez la source. N'hésitez pas et n'exprimez pas d'incertitude.\n\n"
+    "Question : {question}\n\nExtrait :"
+)
+
+# Rewrite prompts (one per language)
+REWRITE_PROMPT_EN: str = (
+    "Rewrite this question as a concise, keyword-rich search query. "
+    "Include named entities and key terms. Output only the query, no explanation.\n\n"
+    "Question: {question}\n\nRewritten query:"
+)
+REWRITE_PROMPT_AR: str = (
+    "أعد كتابة هذا السؤال كاستعلام بحث موجز وغني بالكلمات المفتاحية. "
+    "أدرج الكيانات والأسماء الأساسية. أخرج الاستعلام فقط دون شرح.\n\n"
+    "السؤال: {question}\n\nالاستعلام:"
+)
+REWRITE_PROMPT_FR: str = (
+    "Réécrivez cette question en une requête de recherche concise et riche en "
+    "mots-clés. Incluez les entités nommées et les termes clés. Ne renvoyez que "
+    "la requête, sans explication.\n\n"
+    "Question : {question}\n\nRequête :"
+)
+
+# Fusion
+HYDE_FUSION_TOP_K: int = 10              # candidates from each branch before fusion
+HYDE_FUSION_RRF_K: int = 60              # RRF constant (standard default)
