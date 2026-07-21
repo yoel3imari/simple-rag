@@ -1,9 +1,11 @@
 import argparse
 import json
 from pathlib import Path
+from urllib.parse import urlparse
 
 from src.config import INGEST_STATE_PATH, SUPPORTED_EXTENSIONS
 from src.constants import TransformMode
+from src.crawl import crawl_site
 from src.ingest import ingest
 from src.query import query
 
@@ -68,9 +70,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Simple RAG system")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    ingest_parser = subparsers.add_parser("ingest", help="Ingest a text document")
+    ingest_parser = subparsers.add_parser("ingest", help="Ingest a text document or web URL")
     ingest_parser.add_argument(
-        "file", nargs="*", help="One or more files or directories to ingest"
+        "file", nargs="*", help="One or more files, directories, or URLs to ingest"
     )
     ingest_parser.add_argument(
         "--recreate",
@@ -98,6 +100,14 @@ def main() -> None:
     )
 
     add_eval_parser(subparsers)
+
+    crawl_parser = subparsers.add_parser("crawl", help="Crawl a website and ingest all pages")
+    crawl_parser.add_argument("url", help="Starting URL for the crawl")
+    crawl_parser.add_argument("--max-pages", type=int, default=50, help="Maximum pages to crawl")
+    crawl_parser.add_argument("--max-depth", type=int, default=2, help="Maximum crawl depth")
+    crawl_parser.add_argument("--delay", type=float, default=1.0, help="Delay between requests (seconds)")
+    crawl_parser.add_argument("--scraper", choices=["crawl4ai", "jina"], default="crawl4ai", help="Scraping backend")
+    crawl_parser.add_argument("--force", action="store_true", help="Re-crawl already ingested URLs")
 
     args = parser.parse_args()
 
@@ -131,6 +141,17 @@ def main() -> None:
         answer, sources = query(args.question, transform_mode=args.transform)
         print(f"\n=== Answer ===\n{answer}")
         print(f"\n=== Sources ===\n{sources}")
+    elif args.command == "crawl":
+        pages = crawl_site(
+            args.url,
+            max_pages=args.max_pages,
+            max_depth=args.max_depth,
+            delay=args.delay,
+            scraper=args.scraper,
+        )
+        urls = [p["url"] for p in pages]
+        print(f"\n[crawl] Crawled {len(pages)} pages, now ingesting...")
+        ingest(urls, recreate=False, force=args.force)
     elif args.command == "eval":
         handle_eval(args)
 

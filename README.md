@@ -12,6 +12,7 @@ Step-by-step RAG learning project. Start minimal, scale progressively.
 - **Generation**: `gemma3` via Ollama
 - **Chunking**: Recursive splitter with overlap (512 chars / 64 overlap for text; 1024 chars / 128 overlap for PDF)
 - **Query transformation (v6)**: Optional query rewriting / HyDE with a heuristic gate (`should_transform`) and multilingual prompts (EN/AR/FR). Modes: `none`, `rewrite`, `hyde`, `hyde_fusion`.
+- **Web ingestion (v8)**: Crawl4AI-based URL scraping with JS rendering and clean Markdown output, plus BFS site crawling with `robots.txt` respect and rate limiting.
 
 ## Prerequisites
 
@@ -79,43 +80,54 @@ python -m src.main ingest data/ --force
 
 # Check what's been ingested
 python -m src.main ingest --status
+
+# v8: Scrape and ingest a single web URL (auto-detected)
+python -m src.main ingest https://en.wikipedia.org/wiki/Python_(programming_language)
+
+# v8: Crawl a website and ingest all pages
+python -m src.main crawl https://crawl4ai.com --max-pages 10 --max-depth 2
+
+# v8: Crawl with Jina Reader backend (no browser needed)
+python -m src.main crawl https://blog.example.com --scraper jina --max-pages 5
 ```
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                     CLI (main.py)                    │
-│    python -m src.main ingest <file>                  │
-│    python -m src.main query "<question>"             │
-└────────┬─────────────────────────────┬───────────────┘
-         │                             │
-         ▼                             ▼
-┌──────────────────┐       ┌─────────────────────────────────────┐
-│    ingest.py     │       │            query.py                 │
-│                  │       │                                     │
-│  extract.py      │       │  [gate] should_transform?           │
-│   ├─ .txt read   │       │   ├─ no  → embed raw query          │
-│   ├─ .pdf (PyMuPDF)      │   └─ yes → rewrite / HyDE           │
-│   └─ OCR fallback│       │          → embed transformed        │
-│  recursive split │       │  Quiver search_hybrid():            │
-│  embed chunks    │       │  ┌─ Cosine (FlatIndex)              │
-│  → Quiver col    │       │  ├─ BM25 keyword search             │
-│  → BM25 state    │       │  └─ Weighted fusion → top-k         │
-│                  │       │  → rerank.py (cross-encoder ONNX,   │
-│                  │       │       uses ORIGINAL question)       │
-│                  │       │  → build prompt                     │
-│                  │       │  → Ollama generate                  │
-│                  │       │  → return answer                    │
-└────────┬─────────┘       └────────┬────────────────────────────┘
-         │                          │
-         ▼                          ▼
+┌──────────────────────────────────────────────────────────────┐
+│                      CLI (main.py)                           │
+│    python -m src.main ingest <file|url>                      │
+│    python -m src.main crawl <url>                            │
+│    python -m src.main query "<question>"                     │
+└──────┬───────────────────────────────┬───────────────────────┘
+       │                               │
+       ▼                               ▼
+┌──────────────────────┐   ┌─────────────────────────────────────────┐
+│      ingest.py       │   │              query.py                   │
+│                      │   │                                         │
+│  scrape.py (v8) ─────┼───┤  [gate] should_transform?               │
+│   ├─ Crawl4AI        │   │   ├─ no  → embed raw query              │
+│   └─ Jina Reader     │   │   └─ yes → rewrite / HyDE               │
+│  crawl.py (v8) ──────┤   │          → embed transformed            │
+│   ├─ BFS frontier    │   │  Quiver search_hybrid():                │
+│   └─ robots.txt      │   │  ┌─ Cosine (FlatIndex)                  │
+│  extract.py          │   │  ├─ BM25 keyword search                 │
+│   ├─ .txt read       │   │  └─ Weighted fusion → top-k             │
+│   ├─ .pdf (PyMuPDF)  │   │  → rerank.py (cross-encoder ONNX,      │
+│   └─ OCR fallback    │   │       uses ORIGINAL question)           │
+│  recursive split     │   │  → build prompt                         │
+│  embed chunks        │   │  → Ollama generate                      │
+│  → Quiver col        │   │  → return answer                        │
+│  → BM25 state        │   │                                         │
+└──────────┬───────────┘   └──────────┬──────────────────────────────┘
+           │                          │
+           ▼                          ▼
 ┌──────────────────────────────────────────┐
 │              embed.py                    │
 │  POST /api/embed → np.ndarray            │
 └──────────────────────────────────────────┘
-         │                          │
-         ▼                          ▼
+           │                          │
+           ▼                          ▼
 ┌──────────────────────────────────────────┐
 │              store/                      │
 │  quiver/     │  bm25.json                │
@@ -132,7 +144,9 @@ simple-rag/
 │   ├── __init__.py
 │   ├── config.py      # All tunable parameters
 │   ├── embed.py       # Ollama embedding client
-│   ├── ingest.py      # Document ingestion pipeline
+│   ├── ingest.py      # Document ingestion pipeline (files + web URLs)
+│   ├── scrape.py      # v8: Single URL scraper (Crawl4AI + Jina Reader)
+│   ├── crawl.py       # v8: BFS site crawler (robots.txt, rate limiting)
 │   ├── query.py       # Retrieval + re-ranking + generation
 │   ├── extract.py     # PDF/TXT extraction + language detection + OCR fallback
 │   ├── bm25.py        # Unicode-aware BM25 subclass (Arabic + French support)
@@ -234,6 +248,56 @@ and mangles French text.
 queries, the re-ranker is skipped and the hybrid fusion ranking is returned
 directly, avoiding noisy reordering.
 
+## Web Ingestion (v8)
+
+v8 adds first-class support for ingesting web content — single URLs and full
+site crawls — into the same RAG pipeline as local files.
+
+**Architecture.** Two new modules feed into the existing ingest pipeline:
+
+- `src/scrape.py` — Single-URL scraper with two backends:
+  - **Crawl4AI** (primary): Full JS rendering, clean Markdown output, no API key
+  - **Jina Reader** (fallback): Zero-dependency URL-to-Markdown via `r.jina.ai`
+- `src/crawl.py` — BFS site crawler with configurable depth, same-domain
+  filtering, `robots.txt` respect, and rate limiting with jitter
+
+**URL auto-detection.** The `ingest` command automatically detects URLs
+(`http://` / `https://`) and routes them through the scraper instead of the
+file extraction pipeline:
+
+```bash
+# Single URL — auto-detected
+python -m src.main ingest https://en.wikipedia.org/wiki/Python_(programming_language)
+
+# Force re-ingest a URL
+python -m src.main ingest https://en.wikipedia.org/wiki/Python_(programming_language) --force
+
+# Mix files and URLs
+python -m src.main ingest data/sample.txt https://example.com/docs/intro
+```
+
+**Site crawling.** The `crawl` subcommand recursively discovers and ingests
+same-domain pages:
+
+```bash
+# Crawl a documentation site (default: 50 pages, depth 2)
+python -m src.main crawl https://docs.example.com
+
+# Deep crawl with custom limits
+python -m src.main crawl https://docs.example.com --max-pages 100 --max-depth 3
+
+# Lightweight crawl with Jina Reader (no browser needed)
+python -m src.main crawl https://blog.example.com --scraper jina --max-pages 5
+```
+
+**Key behaviours:**
+- Web chunks use prose chunking params (512 chars / 64 overlap), same as `.txt`
+- Each chunk gets `source_url` and `source_type: "web"` in its payload metadata
+- URLs are used as keys in `ingest_state.json` — re-ingestion is idempotent
+- The `--force` flag re-fetches and replaces existing URL content
+- No changes to `query.py` or `eval.py` — web chunks are indexed identically
+  to file chunks and are retrieved transparently
+
 ## Roadmap
 
 | # | What | Why |
@@ -245,3 +309,5 @@ directly, avoiding noisy reordering.
 | v5 | ✅ Evaluation (hit rate, recall, MRR, faithfulness) | Stop guessing if changes help |
 | v6 | ✅ Query rewriting / HyDE (gated, multilingual, RRF fusion) | Better retrieval for ambiguous / short / cross-lingual queries |
 | v7 | ✅ Multi-document / PDF / ingest state / force-reingest | Real-world ingestion |
+| v8 | ✅ Web source ingestion (crawl, scrape) | Broaden input beyond local files |
+| v9 | 🔲 Docker containerization | Portable one-shot deployment |

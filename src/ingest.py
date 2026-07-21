@@ -1,6 +1,7 @@
 import json
 import shutil
 from pathlib import Path
+from urllib.parse import urlparse
 
 import numpy as np
 
@@ -24,6 +25,7 @@ from src.config import (
 )
 from src.embed import embed
 from src.extract import extract_text
+from src.scrape import ScrapeError, scrape_url
 
 
 def _merge_small(pieces: list[str], separator: str, size: int) -> list[str]:
@@ -170,6 +172,8 @@ def _upsert_chunks(
     gid: int,
     name: str,
     lang: str,
+    *,
+    extra_payload: dict | None = None,
 ) -> None:
     """Upsert chunks with hybrid (dense + sparse) vectors into the collection.
 
@@ -180,32 +184,83 @@ def _upsert_chunks(
         vid = gid + i
         try:
             sparse = bm25.index_document(vid, chunk)
+            payload = {
+                "text": chunk,
+                "source": name,
+                "lang": lang,
+                "chunk_index": vid,
+            }
+            if extra_payload:
+                payload.update(extra_payload)
             col.upsert_hybrid(
                 id=vid,
                 vector=vectors[i].tolist(),
                 sparse_vector=sparse or None,
-                payload={
-                    "text": chunk,
-                    "source": name,
-                    "lang": lang,
-                    "chunk_index": vid,
-                },
+                payload=payload,
             )
         except Exception as e:
             raise RuntimeError(f"Failed to upsert chunk {vid} for '{name}': {e}") from e
 
 
-def ingest_document(
+def _ingest_web(
+    url: str,
+    col: quiver.Collection,
+    bm25: UnicodeBM25,
+    state: dict,
+    force: bool = False,
+) -> int:
+    """Ingest a single URL — scrape, chunk, embed, and index."""
+    name = url
+
+    if name in state["sources"] and not force:
+        print(f"[ingest] '{name}' already ingested, skipping (use --force to re-ingest)")
+        return 0
+
+    try:
+        markdown = scrape_url(url)
+    except ScrapeError as e:
+        print(f"[ingest] Skipping {url}: {e.message}")
+        return 0
+
+    text = markdown
+    lang = "en"
+
+    gid = state["next_id"]
+    _handle_existing_document(state, name, col, bm25, gid)
+
+    size, overlap, seps = _get_chunk_params(".txt")
+    chunks = chunk_text(text, size=size, overlap=overlap, separators=seps)
+    print(f"[ingest] {name}: {len(chunks)} chunks (size={size}, overlap={overlap})")
+
+    if not chunks:
+        return 0
+
+    extra_payload = {"source_url": url, "source_type": "web"}
+
+    try:
+        vectors = _embed_chunks(chunks)
+        _upsert_chunks(chunks, vectors, col, bm25, gid, name, lang, extra_payload=extra_payload)
+    except RuntimeError as e:
+        print(f"[ingest] {e}")
+        return 0
+
+    state["next_id"] = gid + len(chunks)
+    state["sources"][name] = [gid, gid + len(chunks)]
+    save_ingest_state(state)
+    bm25.save(str(BM25_STATE_PATH))
+
+    print(f"[ingest] Indexed {len(chunks)} vectors from {name}")
+    return len(chunks)
+
+
+def _ingest_file(
     path: str,
     col: quiver.Collection,
     bm25: UnicodeBM25,
     state: dict,
     force: bool = False,
 ) -> int:
-    """Ingest a single document into the shared collection.
-
-    Returns the number of chunks indexed (0 if skipped).
-    """
+    """Ingest a single local file — extract, chunk, embed, and index."""
     p = Path(path)
     if not p.exists():
         print(f"[ingest] File not found: {path}")
@@ -251,6 +306,19 @@ def ingest_document(
 
     print(f"[ingest] Indexed {len(chunks)} vectors from {name}")
     return len(chunks)
+
+
+def ingest_document(
+    path: str,
+    col: quiver.Collection,
+    bm25: UnicodeBM25,
+    state: dict,
+    force: bool = False,
+) -> int:
+    """Ingest a single document — dispatches to URL or file path."""
+    if urlparse(path).scheme in ("http", "https"):
+        return _ingest_web(path, col, bm25, state, force=force)
+    return _ingest_file(path, col, bm25, state, force=force)
 
 
 def ingest(sources: str | list[str], recreate: bool = False, force: bool = False) -> int:

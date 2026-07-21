@@ -96,3 +96,15 @@ CHUNK_SEPARATORS_PDF = ["\n\n", "\n", " ", ""]   # drop ". " (unreliable for AR/
 EMBED_BATCH_SIZE = 32          # batch embed() calls (256 chunks hangs Ollama ~230s; 32 ≈30s safe)
 INGEST_STATE_PATH = STORE_DIR / "ingest_state.json"
 SUPPORTED_EXTENSIONS = (".txt", ".pdf")
+
+# ── v8: Web ingestion ────────────────────────────────────────────
+WEB_SCRAPER_BACKEND: str = "crawl4ai"       # "crawl4ai" | "jina"
+WEB_CRAWL_MAX_PAGES: int = 50
+WEB_CRAWL_MAX_DEPTH: int = 2
+WEB_CRAWL_DELAY: float = 1.0                # seconds between requests
+WEB_SCRAPE_TIMEOUT: int = 60                # seconds per page
+
+# Jina Reader (optional — used when WEB_SCRAPER_BACKEND="jina")
+JINA_API_KEY: str | None = None             # set via env or config; None = free tier
+
+# Web chunking uses same constants as TXT (CHUNK_SIZE=512, CHUNK_OVERLAP=64)
