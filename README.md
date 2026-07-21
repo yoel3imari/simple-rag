@@ -298,6 +298,94 @@ python -m src.main crawl https://blog.example.com --scraper jina --max-pages 5
 - No changes to `query.py` or `eval.py` — web chunks are indexed identically
   to file chunks and are retrieved transparently
 
+## Docker (v9)
+
+Containerize simple-rag for portable one-shot deployment — consistent across
+dev, CI, and production environments. Ollama runs externally on the host.
+
+### Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) (with Compose plugin v2+)
+- [Ollama](https://ollama.com/) running on the host with `nomic-embed-text` and
+  `gemma3` models pulled
+
+### Build
+
+```bash
+docker build -t simple-rag:latest .
+```
+
+### Run
+
+```bash
+# Ingest a document
+docker run -v rag-store:/home/appuser/app/store \
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+  simple-rag:latest ingest data/sample.txt
+
+# Query
+docker run -v rag-store:/home/appuser/app/store \
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+  simple-rag:latest query "What are the failure modes of RAG?"
+
+# Run evaluation
+docker run -v rag-store:/home/appuser/app/store \
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+  simple-rag:latest eval
+```
+
+> **Note:** `host.docker.internal` works on macOS and Windows Docker Desktop.
+> On Linux, use `--network=host` or `OLLAMA_BASE_URL=http://172.17.0.1:11434`.
+
+### docker-compose (recommended)
+
+```bash
+# Build the image
+docker compose build
+
+# Ingest a document
+docker compose run --rm simple-rag ingest data/sample.txt
+
+# Query
+docker compose run --rm simple-rag query "What are the failure modes of RAG?"
+
+# Open a shell inside the container
+docker compose run simple-rag /bin/bash
+```
+
+### Shared memory
+
+Chromium (used by Crawl4AI for JS rendering) requires at least 1 GB of shared
+memory. The `docker-compose.yml` sets `shm_size: 1g` automatically. When using
+`docker run` directly, add `--shm-size=1g`.
+
+### Volume management
+
+| Volume | Mount point | Purpose |
+|--------|-------------|---------|
+| `rag-store` | `/home/appuser/app/store` | Vector DB, BM25 state, ingest state |
+| `hf-cache` | `/app/.cache/huggingface` | ONNX model cache (optional, avoids re-download) |
+
+```bash
+# List volumes
+docker volume ls
+
+# Inspect volume data location
+docker volume inspect rag-store
+
+# Remove volumes (⚠️ deletes all indexed data)
+docker compose down -v
+```
+
+### Ollama connectivity
+
+The container connects to Ollama running on the host via `OLLAMA_BASE_URL`:
+
+- **macOS / Windows**: `http://host.docker.internal:11434` (default in compose)
+- **Linux**: `http://172.17.0.1:11434` or `http://<host-ip>:11434`
+
+Override via `-e OLLAMA_BASE_URL=http://your-host:11434` at runtime.
+
 ## Roadmap
 
 | # | What | Why |
@@ -310,4 +398,4 @@ python -m src.main crawl https://blog.example.com --scraper jina --max-pages 5
 | v6 | ✅ Query rewriting / HyDE (gated, multilingual, RRF fusion) | Better retrieval for ambiguous / short / cross-lingual queries |
 | v7 | ✅ Multi-document / PDF / ingest state / force-reingest | Real-world ingestion |
 | v8 | ✅ Web source ingestion (crawl, scrape) | Broaden input beyond local files |
-| v9 | 🔲 Docker containerization | Portable one-shot deployment |
+| v9 | ✅ Docker containerization | Portable one-shot deployment |
