@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from src.config import INGEST_STATE_PATH, SUPPORTED_EXTENSIONS
+from src.constants import TransformMode
 from src.ingest import ingest
 from src.query import query
 
@@ -33,7 +34,7 @@ def add_eval_parser(subparsers):
     )
     eval_parser.add_argument(
         "--transform",
-        choices=["none", "rewrite", "hyde", "hyde_fusion"],
+        choices=[m.value for m in TransformMode],
         default=None,
         help="Query transformation mode (default: config QUERY_TRANSFORM_MODE)",
     )
@@ -91,7 +92,7 @@ def main() -> None:
     query_parser.add_argument("question", help="Your question")
     query_parser.add_argument(
         "--transform",
-        choices=["none", "rewrite", "hyde", "hyde_fusion"],
+        choices=[m.value for m in TransformMode],
         default=None,
         help="Query transformation mode (default: config QUERY_TRANSFORM_MODE)",
     )

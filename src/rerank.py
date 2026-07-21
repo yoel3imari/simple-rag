@@ -23,28 +23,44 @@ def _snapshot_dir() -> str:
 
 @cache
 def _load_pipeline():
-    """Lazy-load cross-encoder tokenizer + ONNX session (cached)."""
-    snapshot = _snapshot_dir()
+    """Lazy-load cross-encoder tokenizer + ONNX session (cached).
 
-    tokenizer = Tokenizer.from_file(os.path.join(snapshot, "tokenizer.json"))
-    tokenizer.enable_truncation(max_length=512)
+    Returns ``(tokenizer, session, output_name)`` tuple on success, or
+    *None* if loading fails (e.g. missing model files, network error).
+    The caller should gracefully degrade when *None* is returned.
+    """
+    try:
+        snapshot = _snapshot_dir()
 
-    session = ort.InferenceSession(
-        os.path.join(snapshot, "onnx/model.onnx"),
-        providers=["CPUExecutionProvider"],
-    )
-    output_name = session.get_outputs()[0].name
+        tokenizer = Tokenizer.from_file(os.path.join(snapshot, "tokenizer.json"))
+        tokenizer.enable_truncation(max_length=512)
 
-    return tokenizer, session, output_name
+        session = ort.InferenceSession(
+            os.path.join(snapshot, "onnx/model.onnx"),
+            providers=["CPUExecutionProvider"],
+        )
+        output_name = session.get_outputs()[0].name
+
+        return tokenizer, session, output_name
+    except Exception as e:
+        print(
+            f"[rerank] WARNING: Failed to load cross-encoder pipeline"
+            f" ({e}) — reranking disabled."
+        )
+        return None
 
 
 def rerank(query: str, texts: list[str]) -> list[float]:
     """Score each (query, text) pair with a cross-encoder (ONNX).
 
     Returns list of relevance scores in the same order as *texts*.
-    Higher score = more relevant.
+    Higher score = more relevant.  Returns all zeros when the
+    cross-encoder pipeline is unavailable.
     """
-    tokenizer, session, output_name = _load_pipeline()
+    pipeline = _load_pipeline()
+    if pipeline is None:
+        return [0.0] * len(texts) if texts else []
+    tokenizer, session, output_name = pipeline
 
     if not texts:
         return []

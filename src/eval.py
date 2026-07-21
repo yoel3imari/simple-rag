@@ -3,39 +3,33 @@ import unicodedata
 from pathlib import Path
 
 import numpy as np
-import requests
 
 import quiver_vector_db as quiver
 from src.bm25 import UnicodeBM25
+from src.prompts import build_generation_prompt
 
 from src.config import (
     BM25_B,
     BM25_K1,
     BM25_STATE_PATH,
     EVAL_QUERIES_PATH,
-    HYBRID_DENSE_WEIGHT,
-    HYBRID_SPARSE_WEIGHT,
-    OLLAMA_BASE_URL,
     OLLAMA_GEN_MODEL,
     QUIVER_STORE_PATH,
     RERANKER_MODEL,
     TOP_K,
     TOP_K_RERANK,
 )
-from src.embed import embed
-from src.rerank import rerank
+from src.llm import ollama_chat
 from src.query_transform import (
     should_transform,
     detect_language,
     rewrite_query,
     generate_hypothetical_doc,
-    reciprocal_rank_fusion,
-    RAW,
-    REWRITE,
-    HYDE,
-    HYDE_FUSION,
+    run_hyde_fusion,
+    _standard_retrieve,
 )
-from src.config import QUERY_TRANSFORM_MODE, HYDE_FUSION_TOP_K, HYDE_FUSION_RRF_K
+from src.constants import TransformMode
+from src.config import QUERY_TRANSFORM_MODE
 
 
 # ── Normalisation helper ──────────────────────────────────────────
@@ -87,91 +81,25 @@ def _retrieve(
     mode = transform_mode or QUERY_TRANSFORM_MODE
     embed_text = question
 
-    if mode in (REWRITE, HYDE, HYDE_FUSION) and should_transform(question):
+    if mode in (TransformMode.REWRITE, TransformMode.HYDE, TransformMode.HYDE_FUSION) and should_transform(question):
         lang = detect_language(question)
-        if mode == REWRITE:
+        if mode == TransformMode.REWRITE:
             embed_text = rewrite_query(question, lang)
-        elif mode == HYDE:
+        elif mode == TransformMode.HYDE:
             embed_text = generate_hypothetical_doc(question, lang)
-        # HYDE_FUSION handled in its own block below
 
-    # ── HYDE_FUSION: dual search + RRF fusion ──────────────────
-    if mode == HYDE_FUSION and should_transform(question):
-        lang = detect_language(question)
-        hyde_text = generate_hypothetical_doc(question, lang)
-
-        dense_w = HYBRID_DENSE_WEIGHT
-        sparse_w = HYBRID_SPARSE_WEIGHT
-        if not use_bm25:
-            sparse_w = 0.0
-
-        raw_vec = embed(question)[0]
-        raw_sparse = bm25.encode_query(question)
-        raw_hits = col.search_hybrid(
-            dense_query=raw_vec.tolist(),
-            sparse_query=raw_sparse,
-            k=HYDE_FUSION_TOP_K,
-            dense_weight=dense_w,
-            sparse_weight=sparse_w,
+    if mode == TransformMode.HYDE_FUSION and should_transform(question):
+        hits, _ = run_hyde_fusion(
+            question, col, bm25,
+            top_k=top_k, use_rerank=use_rerank, use_bm25=use_bm25,
         )
-        hyde_vec = embed(hyde_text)[0]
-        hyde_sparse = bm25.encode_query(hyde_text)
-        hyde_hits = col.search_hybrid(
-            dense_query=hyde_vec.tolist(),
-            sparse_query=hyde_sparse,
-            k=HYDE_FUSION_TOP_K,
-            dense_weight=dense_w,
-            sparse_weight=sparse_w,
-        )
-
-        raw_rank = [h["payload"]["chunk_index"] for h in raw_hits]
-        hyde_rank = [h["payload"]["chunk_index"] for h in hyde_hits]
-        fused = reciprocal_rank_fusion([raw_rank, hyde_rank], k=HYDE_FUSION_RRF_K)
-
-        by_chunk = {h["payload"]["chunk_index"]: h for h in raw_hits + hyde_hits}
-        hits = [by_chunk[ci] for ci, _ in fused if ci in by_chunk]
-
-        # Skip re-ranking for non-English queries (cross-encoder is English-only)
-        if use_rerank and lang not in ('ar', 'fr') and hits:
-            texts = [h["payload"]["text"] for h in hits]
-            ce_scores = rerank(question, texts)
-            ranked = sorted(zip(hits, ce_scores), key=lambda x: x[1], reverse=True)
-            hits = [h for h, _ in ranked[:top_k]]
-        else:
-            hits = hits[:top_k]
-
         return hits
 
-    # ── Standard path (RAW, REWRITE, HYDE, and HYDE_FUSION with no transform) ──
-    q_vec = embed(embed_text)[0]
-
-    dense_w = HYBRID_DENSE_WEIGHT
-    sparse_w = HYBRID_SPARSE_WEIGHT
-    if not use_bm25:
-        sparse_w = 0.0
-
-    # Skip re-ranking for non-English queries (cross-encoder is English-only)
-    if use_rerank:
-        lang = detect_language(question)
-        if lang in ('ar', 'fr'):
-            use_rerank = False
-
-    sparse_query = bm25.encode_query(question)
-    k = top_k_rerank if use_rerank else top_k
-    hits = col.search_hybrid(
-        dense_query=q_vec.tolist(),
-        sparse_query=sparse_query,
-        k=k,
-        dense_weight=dense_w,
-        sparse_weight=sparse_w,
+    hits, _ = _standard_retrieve(
+        question, embed_text, col, bm25,
+        top_k=top_k, top_k_rerank=top_k_rerank,
+        use_rerank=use_rerank, use_bm25=use_bm25,
     )
-
-    if use_rerank and hits:
-        texts = [h["payload"]["text"] for h in hits]
-        ce_scores = rerank(question, texts)
-        ranked = sorted(zip(hits, ce_scores), key=lambda x: x[1], reverse=True)
-        hits = [h for h, _ in ranked[:top_k]]
-
     return hits
 
 
@@ -235,17 +163,7 @@ def _faithfulness_score(question: str, context: str, answer: str) -> float:
         return 0.0
 
     prompt_text = _F_PROMPT.format(context=context, question=question, answer=answer)
-    resp = requests.post(
-        f"{OLLAMA_BASE_URL}/api/chat",
-        json={
-            "model": OLLAMA_GEN_MODEL,
-            "messages": [{"role": "user", "content": prompt_text}],
-            "stream": False,
-        },
-        timeout=120,
-    )
-    resp.raise_for_status()
-    content = resp.json()["message"]["content"].strip()
+    content = ollama_chat(OLLAMA_GEN_MODEL, prompt_text, timeout=120)
 
     try:
         return float(content.split("\n")[0].strip())
@@ -318,7 +236,7 @@ def run_eval(
 
 def compare_transforms() -> dict:
     """Run eval for each transform mode and print a comparison table."""
-    modes = [RAW, REWRITE, HYDE, HYDE_FUSION]
+    modes = [TransformMode.NONE, TransformMode.REWRITE, TransformMode.HYDE, TransformMode.HYDE_FUSION]
     results = {}
     for m in modes:
         print(f"\n>>> Running eval with transform_mode={m!r} ...")
@@ -339,21 +257,8 @@ def _generate(question: str, context: str) -> str:
     """Run the full generation pipeline (duplicated from query.py for cleanliness)."""
     if not context:
         return ""
-    prompt = f"""You are a helpful assistant. Use the context below to answer the question.
-
-Context:
-{context}
-
-Question: {question}
-
-Answer:"""
-    resp = requests.post(
-        f"{OLLAMA_BASE_URL}/api/chat",
-        json={"model": OLLAMA_GEN_MODEL, "messages": [{"role": "user", "content": prompt}], "stream": False},
-        timeout=120,
-    )
-    resp.raise_for_status()
-    return resp.json()["message"]["content"]
+    prompt = build_generation_prompt(question, context)
+    return ollama_chat(OLLAMA_GEN_MODEL, prompt, timeout=120)
 
 
 def _summarise(rows: list[dict]) -> dict:

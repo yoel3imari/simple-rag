@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from src.constants import TransformMode
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 STORE_DIR = PROJECT_ROOT / "store"
@@ -40,7 +42,7 @@ TOP_K_RERANK = 30      # candidate pool size before re-ranking (increased from 1
 EVAL_QUERIES_PATH = DATA_DIR / "eval_queries.json"
 
 # Transform mode: "none" | "rewrite" | "hyde" | "hyde_fusion"
-QUERY_TRANSFORM_MODE: str = "none"
+QUERY_TRANSFORM_MODE: TransformMode = TransformMode.NONE
 
 # Heuristic gating — skip transform for well-formed queries
 TRANSFORM_MIN_LENGTH: int = 5             # min words to consider "well-formed"

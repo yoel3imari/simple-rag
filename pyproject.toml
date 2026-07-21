@@ -14,5 +14,8 @@ dependencies = [
     "PyMuPDF>=1.24.0",  # v7: PDF text extraction (C ext, no PyTorch, excellent Arabic/Unicode)
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
 [project.scripts]
 simple-rag = "src.main:main"

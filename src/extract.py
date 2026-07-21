@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from src.constants import Language
+
 import fitz  # PyMuPDF
 _ARABIC_RE = re.compile(r"[\u0600-\u06FF]")
 
@@ -21,25 +23,26 @@ _FRENCH_STOPWORDS = frozenset({
 })
 
 
-def detect_doc_lang(filename: str, text: str) -> str:
+def detect_doc_lang(filename: str, text: str) -> Language:
     """Heuristic language detection based on filename hint + character/word analysis.
 
-    Returns "ar", "fr", or "en". Detection is COSMETIC only — ``lang`` is stored
-    in payloads for display/analytics, never used for retrieval routing.
+    Returns ``Language.AR``, ``Language.FR``, or ``Language.EN``. Detection is
+    COSMETIC only — ``lang`` is stored in payloads for display/analytics, never
+    used for retrieval routing.
     """
     name_lower = filename.lower()
 
     if "ar" in name_lower or _ARABIC_RE.search(text):
-        return "ar"
+        return Language.AR
 
     if "fr" in name_lower:
-        return "fr"
+        return Language.FR
     text_lower = text.lower()
     for word in _FRENCH_STOPWORDS:
         if re.search(rf"\b{re.escape(word)}\b", text_lower):
-            return "fr"
+            return Language.FR
 
-    return "en"
+    return Language.EN
 
 
 def _is_garbled(text: str) -> bool:
@@ -200,7 +203,7 @@ def _extract_pdf_ocr(path: str, ocr_lang: str = "eng") -> str | None:
     return "\n\n".join(pages_text)
 
 
-def extract_text(path: str) -> tuple[str, str]:
+def extract_text(path: str) -> tuple[str, Language]:
     """Extract text from a .txt or .pdf file and detect its language.
 
     Args:
@@ -210,33 +213,39 @@ def extract_text(path: str) -> tuple[str, str]:
         ``(text, lang)`` tuple where *lang* is "ar", "fr", or "en".
 
     Raises:
-        ValueError: If the file extension is not .txt or .pdf.
+        ValueError: If the file extension is not .txt or .pdf, or if the
+            file cannot be read.
     """
-    p = Path(path)
-    suffix = p.suffix.lower()
+    try:
+        p = Path(path)
+        suffix = p.suffix.lower()
 
-    if suffix == ".txt":
-        text = p.read_text(encoding="utf-8")
-    elif suffix == ".pdf":
-        doc = fitz.open(path)
-        text = "\n\n".join(page.get_text("text") for page in doc)
-        doc.close()
+        if suffix == ".txt":
+            text = p.read_text(encoding="utf-8")
+        elif suffix == ".pdf":
+            doc = fitz.open(path)
+            text = "\n\n".join(page.get_text("text") for page in doc)
+            doc.close()
 
-        # Broken-ToUnicode CMap detection + OCR fallback
-        if _is_garbled(text):
-            print(f"[extract] WARNING: Garbled text detected in '{path}' — trying OCR fallback ...")
-            ocr_lang = _ocr_lang_from_hint(p.name)
-            ocr_text = _extract_pdf_ocr(path, ocr_lang)
-            if ocr_text is not None:
-                text = ocr_text
-            else:
-                print(
-                    "[extract] WARNING: OCR fallback failed — keeping garbled extracted text."
-                )
+            # Broken-ToUnicode CMap detection + OCR fallback
+            if _is_garbled(text):
+                print(f"[extract] WARNING: Garbled text detected in '{path}' — trying OCR fallback ...")
+                ocr_lang = _ocr_lang_from_hint(p.name)
+                ocr_text = _extract_pdf_ocr(path, ocr_lang)
+                if ocr_text is not None:
+                    text = ocr_text
+                else:
+                    print(
+                        "[extract] WARNING: OCR fallback failed — keeping garbled extracted text."
+                    )
 
-        text = re.sub(r"\n{3,}", "\n\n", text)
-    else:
-        raise ValueError(f"Unsupported file type: {path}")
+            text = re.sub(r"\n{3,}", "\n\n", text)
+        else:
+            raise ValueError(f"Unsupported file type: {path}")
+    except FileNotFoundError:
+        raise ValueError(f"File not found: {path}") from None
+    except (PermissionError, OSError) as e:
+        raise ValueError(f"Cannot read {path}: {e}") from e
 
     lang = detect_doc_lang(p.name, text)
 

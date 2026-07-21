@@ -127,6 +127,74 @@ def _init_store(recreate: bool) -> tuple[quiver.Collection, UnicodeBM25]:
     return col, bm25
 
 
+def _get_chunk_params(suffix: str) -> tuple[int, int, list[str]]:
+    """Return (size, overlap, separators) based on file extension."""
+    if suffix == ".pdf":
+        return CHUNK_SIZE_PDF, CHUNK_OVERLAP_PDF, list(CHUNK_SEPARATORS_PDF)
+    return CHUNK_SIZE, CHUNK_OVERLAP, list(CHUNK_SEPARATORS)
+
+
+def _handle_existing_document(state: dict, name: str, col: quiver.Collection, bm25: UnicodeBM25, gid: int) -> None:
+    """Remove existing chunks for a document being force re-ingested."""
+    if name in state["sources"]:
+        start, end = state["sources"][name]
+        for i in range(start, end):
+            col.delete(i)
+            bm25.remove_document(i)
+
+
+def _embed_chunks(chunks: list[str]) -> np.ndarray:
+    """Embed chunks in batches and return normalised vectors.
+
+    Raises:
+        RuntimeError: If any embedding batch fails.
+    """
+    all_vectors: list[np.ndarray] = []
+    for b in range(0, len(chunks), EMBED_BATCH_SIZE):
+        batch = chunks[b : b + EMBED_BATCH_SIZE]
+        try:
+            vecs = embed(batch)
+        except Exception as e:
+            raise RuntimeError(f"Embedding failed for batch {b // EMBED_BATCH_SIZE}: {e}") from e
+        all_vectors.append(vecs)
+    vectors = np.concatenate(all_vectors, axis=0)
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    return vectors / norms
+
+
+def _upsert_chunks(
+    chunks: list[str],
+    vectors: np.ndarray,
+    col: quiver.Collection,
+    bm25: UnicodeBM25,
+    gid: int,
+    name: str,
+    lang: str,
+) -> None:
+    """Upsert chunks with hybrid (dense + sparse) vectors into the collection.
+
+    Raises:
+        RuntimeError: If any upsert operation fails.
+    """
+    for i, chunk in enumerate(chunks):
+        vid = gid + i
+        try:
+            sparse = bm25.index_document(vid, chunk)
+            col.upsert_hybrid(
+                id=vid,
+                vector=vectors[i].tolist(),
+                sparse_vector=sparse or None,
+                payload={
+                    "text": chunk,
+                    "source": name,
+                    "lang": lang,
+                    "chunk_index": vid,
+                },
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to upsert chunk {vid} for '{name}': {e}") from e
+
+
 def ingest_document(
     path: str,
     col: quiver.Collection,
@@ -159,24 +227,9 @@ def ingest_document(
         print(f"[ingest] '{name}' already ingested, skipping (use --force to re-ingest)")
         return 0
 
-    suffix = p.suffix.lower()
-    if suffix == ".pdf":
-        size = CHUNK_SIZE_PDF
-        overlap = CHUNK_OVERLAP_PDF
-        seps = list(CHUNK_SEPARATORS_PDF)
-    else:
-        size = CHUNK_SIZE
-        overlap = CHUNK_OVERLAP
-        seps = list(CHUNK_SEPARATORS)
-
-    if force and name in state["sources"]:
-        start, end = state["sources"][name]
-        for i in range(start, end):
-            col.delete(i)
-            bm25.remove_document(i)
-        gid = state["next_id"]
-    else:
-        gid = state["next_id"]
+    size, overlap, seps = _get_chunk_params(p.suffix.lower())
+    gid = state["next_id"]
+    _handle_existing_document(state, name, col, bm25, gid)
 
     chunks = chunk_text(text, size=size, overlap=overlap, separators=seps)
     print(f"[ingest] {name}: {len(chunks)} chunks (size={size}, overlap={overlap})")
@@ -184,31 +237,12 @@ def ingest_document(
     if not chunks:
         return 0
 
-    all_vectors: list[np.ndarray] = []
-    for b in range(0, len(chunks), EMBED_BATCH_SIZE):
-        batch = chunks[b : b + EMBED_BATCH_SIZE]
-        vecs = embed(batch)
-        all_vectors.append(vecs)
-    vectors = np.concatenate(all_vectors, axis=0)
-
-    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-    vectors = vectors / norms
-
-    # Upsert via upsert_hybrid (fixes bug #1: BM25 sparse vectors stored)
-    for i, chunk in enumerate(chunks):
-        vid = gid + i
-        sparse = bm25.index_document(vid, chunk)
-        col.upsert_hybrid(
-            id=vid,
-            vector=vectors[i].tolist(),
-            sparse_vector=sparse or None,
-            payload={
-                "text": chunk,
-                "source": name,
-                "lang": lang,
-                "chunk_index": vid,
-            },
-        )
+    try:
+        vectors = _embed_chunks(chunks)
+        _upsert_chunks(chunks, vectors, col, bm25, gid, name, lang)
+    except RuntimeError as e:
+        print(f"[ingest] {e}")
+        return 0
 
     state["next_id"] = gid + len(chunks)
     state["sources"][name] = [gid, gid + len(chunks)]
