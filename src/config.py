@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from src.constants import TransformMode
@@ -15,7 +16,7 @@ OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 EMBEDDING_DIM = 768
 
 # Generation model
-OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_GEN_MODEL = "gemma3:1b"
 
 # Chunking

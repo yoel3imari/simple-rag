@@ -21,14 +21,20 @@ def _scrape_crawl4ai(
     event_loop: asyncio.AbstractEventLoop | None = None,
 ) -> str:
     try:
-        from crawl4ai import AsyncWebCrawler
+        from crawl4ai import AsyncWebCrawler, BrowserConfig
     except ImportError:
         msg = "crawl4ai is not installed — run `uv sync` to install dependencies"
         print(f"[scrape] ERROR: {url}: {msg}")
         raise ScrapeError(url, msg)
 
+    browser_config = BrowserConfig(
+        headless=True,
+        text_mode=True,
+        extra_args=["--disable-gpu", "--disable-dev-shm-usage"],
+    )
+
     async def _crawl():
-        async with AsyncWebCrawler() as crawler:
+        async with AsyncWebCrawler(config=browser_config) as crawler:
             result = await crawler.arun(url, timeout=timeout)
             return result.markdown if result else ""
 
