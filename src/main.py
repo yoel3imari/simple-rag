@@ -1,5 +1,8 @@
 import argparse
+import json
+from pathlib import Path
 
+from src.config import INGEST_STATE_PATH, SUPPORTED_EXTENSIONS
 from src.ingest import ingest
 from src.query import query
 
@@ -64,16 +67,26 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Simple RAG system")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # ingest subcommand
     ingest_parser = subparsers.add_parser("ingest", help="Ingest a text document")
-    ingest_parser.add_argument("file", help="Path to the text file")
+    ingest_parser.add_argument(
+        "file", nargs="*", help="One or more files or directories to ingest"
+    )
     ingest_parser.add_argument(
         "--recreate",
         action="store_true",
         help="Recreate the vector database from scratch",
     )
+    ingest_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-ingest even if already ingested",
+    )
+    ingest_parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Print ingest state (sources + chunk counts) and exit",
+    )
 
-    # query subcommand
     query_parser = subparsers.add_parser("query", help="Ask a question")
     query_parser.add_argument("question", help="Your question")
     query_parser.add_argument(
@@ -83,13 +96,36 @@ def main() -> None:
         help="Query transformation mode (default: config QUERY_TRANSFORM_MODE)",
     )
 
-    # eval subcommand
     add_eval_parser(subparsers)
 
     args = parser.parse_args()
 
     if args.command == "ingest":
-        ingest(args.file, recreate=args.recreate)
+        if args.status:
+            if INGEST_STATE_PATH.exists():
+                state = json.loads(INGEST_STATE_PATH.read_text())
+                print(json.dumps(state, indent=2))
+            else:
+                print("no ingest state yet")
+            return
+
+        if not args.file:
+            ingest_parser.error("the following arguments are required: file")
+
+        expanded: list[str] = []
+        for p in args.file:
+            path = Path(p)
+            if path.is_dir():
+                expanded.extend(
+                    sorted(
+                        str(f)
+                        for f in path.rglob("*")
+                        if f.suffix.lower() in SUPPORTED_EXTENSIONS
+                    )
+                )
+            else:
+                expanded.append(p)
+        ingest(expanded, recreate=args.recreate, force=args.force)
     elif args.command == "query":
         answer, sources = query(args.question, transform_mode=args.transform)
         print(f"\n=== Answer ===\n{answer}")

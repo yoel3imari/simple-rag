@@ -34,12 +34,10 @@ BM25_B = 0.75
 
 # Cross-encoder re-ranker
 RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-TOP_K_RERANK = 10      # candidate pool size before re-ranking
+TOP_K_RERANK = 30      # candidate pool size before re-ranking (increased from 10 for better coverage with more documents)
 
 # Evaluation
 EVAL_QUERIES_PATH = DATA_DIR / "eval_queries.json"
-
-# ── Query transformation (v6) ──────────────────────────────
 
 # Transform mode: "none" | "rewrite" | "hyde" | "hyde_fusion"
 QUERY_TRANSFORM_MODE: str = "none"
@@ -89,3 +87,10 @@ REWRITE_PROMPT_FR: str = (
 # Fusion
 HYDE_FUSION_TOP_K: int = 10              # candidates from each branch before fusion
 HYDE_FUSION_RRF_K: int = 60              # RRF constant (standard default)
+
+CHUNK_SIZE_PDF = 1024          # larger window for dense legal text
+CHUNK_OVERLAP_PDF = 128
+CHUNK_SEPARATORS_PDF = ["\n\n", "\n", " ", ""]   # drop ". " (unreliable for AR/FR)
+EMBED_BATCH_SIZE = 32          # batch embed() calls (256 chunks hangs Ollama ~230s; 32 ≈30s safe)
+INGEST_STATE_PATH = STORE_DIR / "ingest_state.json"
+SUPPORTED_EXTENSIONS = (".txt", ".pdf")

@@ -1,11 +1,12 @@
 import json
+import unicodedata
 from pathlib import Path
 
 import numpy as np
 import requests
 
 import quiver_vector_db as quiver
-from quiver_vector_db import BM25
+from src.bm25 import UnicodeBM25
 
 from src.config import (
     BM25_B,
@@ -37,6 +38,17 @@ from src.query_transform import (
 from src.config import QUERY_TRANSFORM_MODE, HYDE_FUSION_TOP_K, HYDE_FUSION_RRF_K
 
 
+# ── Normalisation helper ──────────────────────────────────────────
+
+
+def norm(text: str) -> str:
+    """NFKD normalise, strip combining marks, lowercase, collapse whitespace."""
+    t = unicodedata.normalize("NFKD", text)
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    t = t.lower()
+    return " ".join(t.split())
+
+
 # ── Dataset ──────────────────────────────────────────────────────
 
 
@@ -51,7 +63,7 @@ def load_dataset(path: str | Path = EVAL_QUERIES_PATH) -> list[dict]:
 def _load_store():
     client = quiver.Client(path=str(QUIVER_STORE_PATH))
     col = client.get_collection("docs")
-    bm25 = BM25.load(str(BM25_STATE_PATH))
+    bm25 = UnicodeBM25.load(str(BM25_STATE_PATH))
     return col, bm25
 
 
@@ -73,7 +85,7 @@ def _retrieve(
     the cross-encoder reranker always uses the **original** question.
     """
     mode = transform_mode or QUERY_TRANSFORM_MODE
-    embed_text = question  # default: embed raw question
+    embed_text = question
 
     if mode in (REWRITE, HYDE, HYDE_FUSION) and should_transform(question):
         lang = detect_language(question)
@@ -93,7 +105,6 @@ def _retrieve(
         if not use_bm25:
             sparse_w = 0.0
 
-        # Raw branch
         raw_vec = embed(question)[0]
         raw_sparse = bm25.encode_query(question)
         raw_hits = col.search_hybrid(
@@ -103,7 +114,6 @@ def _retrieve(
             dense_weight=dense_w,
             sparse_weight=sparse_w,
         )
-        # HyDE branch
         hyde_vec = embed(hyde_text)[0]
         hyde_sparse = bm25.encode_query(hyde_text)
         hyde_hits = col.search_hybrid(
@@ -114,16 +124,15 @@ def _retrieve(
             sparse_weight=sparse_w,
         )
 
-        # Fuse by chunk_index via RRF
         raw_rank = [h["payload"]["chunk_index"] for h in raw_hits]
         hyde_rank = [h["payload"]["chunk_index"] for h in hyde_hits]
         fused = reciprocal_rank_fusion([raw_rank, hyde_rank], k=HYDE_FUSION_RRF_K)
 
-        # Rebuild hits list from fused chunk_index order
         by_chunk = {h["payload"]["chunk_index"]: h for h in raw_hits + hyde_hits}
         hits = [by_chunk[ci] for ci, _ in fused if ci in by_chunk]
 
-        if use_rerank and hits:
+        # Skip re-ranking for non-English queries (cross-encoder is English-only)
+        if use_rerank and lang not in ('ar', 'fr') and hits:
             texts = [h["payload"]["text"] for h in hits]
             ce_scores = rerank(question, texts)
             ranked = sorted(zip(hits, ce_scores), key=lambda x: x[1], reverse=True)
@@ -140,6 +149,12 @@ def _retrieve(
     sparse_w = HYBRID_SPARSE_WEIGHT
     if not use_bm25:
         sparse_w = 0.0
+
+    # Skip re-ranking for non-English queries (cross-encoder is English-only)
+    if use_rerank:
+        lang = detect_language(question)
+        if lang in ('ar', 'fr'):
+            use_rerank = False
 
     sparse_query = bm25.encode_query(question)
     k = top_k_rerank if use_rerank else top_k
@@ -163,26 +178,30 @@ def _retrieve(
 # ── Metrics ──────────────────────────────────────────────────────
 
 
-def _hit_at_k(retrieved: list[int], expected: list[int]) -> bool:
-    """Did any expected chunk appear in retrieved list?"""
+def _hit_at_k(retrieved_texts: list[str], expected: list[str]) -> bool:
+    """Did any expected substring appear in any retrieved chunk?"""
     if not expected:
-        return True  # negative query: retrieving nothing is a "hit"
-    return any(c in retrieved for c in expected)
+        return True  # negative query
+    norm_exp = [norm(e) for e in expected]
+    return any(any(ne in norm(rt) for rt in retrieved_texts) for ne in norm_exp)
 
 
-def _recall_at_k(retrieved: list[int], expected: list[int]) -> float:
-    """Fraction of expected chunks found in retrieved list."""
-    if not expected:
-        return 1.0
-    return sum(1 for c in expected if c in retrieved) / len(expected)
-
-
-def _mrr(retrieved: list[int], expected: list[int]) -> float:
-    """Reciprocal rank of first relevant hit."""
+def _recall_at_k(retrieved_texts: list[str], expected: list[str]) -> float:
+    """Fraction of expected substrings covered by retrieved chunks."""
     if not expected:
         return 1.0
-    for rank, c in enumerate(retrieved, start=1):
-        if c in expected:
+    norm_exp = [norm(e) for e in expected]
+    covered = [ne for ne in norm_exp if any(ne in norm(rt) for rt in retrieved_texts)]
+    return len(covered) / len(expected)
+
+
+def _mrr(retrieved_texts: list[str], expected: list[str]) -> float:
+    """Reciprocal rank of first hit chunk containing any expected substring."""
+    if not expected:
+        return 1.0
+    norm_exp = [norm(e) for e in expected]
+    for rank, rt in enumerate(retrieved_texts, start=1):
+        if any(ne in norm(rt) for ne in norm_exp):
             return 1.0 / rank
     return 0.0
 
@@ -256,7 +275,7 @@ def run_eval(
     rows = []
     for entry in dataset:
         question = entry["question"]
-        expected = entry["answer_chunks"]
+        expected = entry.get("expected_substrings", [])
 
         hits = _retrieve(
             question,
@@ -269,16 +288,21 @@ def run_eval(
             transform_mode=transform_mode,
         )
 
-        retrieved = [h["payload"]["chunk_index"] for h in hits]
+        retrieved_texts = [h["payload"]["text"] for h in hits]
+        retrieved_ids = [h["payload"]["chunk_index"] for h in hits]
+
+        norm_exp = [norm(e) for e in expected]
+        covered = [e for e, ne in zip(expected, norm_exp) if any(ne in norm(rt) for rt in retrieved_texts)]
 
         row = {
             "question": question,
             "category": entry["category"],
             "expected": expected,
-            "retrieved": retrieved,
-            "hit": _hit_at_k(retrieved, expected),
-            "recall": _recall_at_k(retrieved, expected),
-            "mrr": _mrr(retrieved, expected),
+            "retrieved": retrieved_ids,
+            "hit": _hit_at_k(retrieved_texts, expected),
+            "recall": _recall_at_k(retrieved_texts, expected),
+            "mrr": _mrr(retrieved_texts, expected),
+            "covered": covered,
         }
 
         if faithfulness:
@@ -408,8 +432,9 @@ def print_report(summary: dict):
     print(f"  {'─' * 40}")
     for r in summary["rows"]:
         status = "✓" if r["hit"] else "✗"
+        covered_str = f" covered={r['covered']}" if r["covered"] else ""
         print(
-            f"  [{status}] {r['category']:<10} expected={r['expected']}  got={r['retrieved']}  "
-            f"recall={r['recall']:.2f}  MRR={r['mrr']:.2f}"
+            f"  [{status}] {r['category']:<10} expected={r['expected']}  got={r['retrieved']}"
+            f"{covered_str}  recall={r['recall']:.2f}  MRR={r['mrr']:.2f}"
         )
         print(f"       {r['question'][:70]}")

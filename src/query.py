@@ -3,7 +3,7 @@ from pathlib import Path
 import requests
 
 import quiver_vector_db as quiver
-from quiver_vector_db import BM25
+from src.bm25 import UnicodeBM25
 
 from src.config import (
     BM25_STATE_PATH,
@@ -40,7 +40,7 @@ def query(question: str, transform_mode: str | None = None) -> tuple[str, str]:
     # 1. Load Quiver collection and BM25 state
     client = quiver.Client(path=str(QUIVER_STORE_PATH))
     col = client.get_collection("docs")
-    bm25 = BM25.load(str(BM25_STATE_PATH))
+    bm25 = UnicodeBM25.load(str(BM25_STATE_PATH))
 
     # 1.5 Query transformation (v6) — decide what to embed
     mode = transform_mode or QUERY_TRANSFORM_MODE
@@ -52,9 +52,7 @@ def query(question: str, transform_mode: str | None = None) -> tuple[str, str]:
             embed_text = rewrite_query(question, lang)
         elif mode == HYDE:
             embed_text = generate_hypothetical_doc(question, lang)
-        # HYDE_FUSION handled in its own block below
 
-    # ── HYDE_FUSION: dual search + RRF fusion ──────────────────
     if mode == HYDE_FUSION and should_transform(question):
         lang = detect_language(question)
         hyde_text = generate_hypothetical_doc(question, lang)
@@ -89,32 +87,41 @@ def query(question: str, transform_mode: str | None = None) -> tuple[str, str]:
         by_chunk = {h["payload"]["chunk_index"]: h for h in raw_hits + hyde_hits}
         hits = [by_chunk[ci] for ci, _ in fused if ci in by_chunk][:TOP_K]
 
-        # Rerank with ORIGINAL question
-        texts = [h["payload"]["text"] for h in hits]
-        ce_scores = rerank(question, texts)
-        ranked = sorted(zip(hits, ce_scores), key=lambda x: x[1], reverse=True)
-        hits = [h for h, _ in ranked[:TOP_K]]
-        scores = [s for _, s in ranked[:TOP_K]]
+        # Rerank with ORIGINAL question (skip for non-English — cross-encoder is English-only)
+        if lang not in ('ar', 'fr'):
+            texts = [h["payload"]["text"] for h in hits]
+            ce_scores = rerank(question, texts)
+            ranked = sorted(zip(hits, ce_scores), key=lambda x: x[1], reverse=True)
+            hits = [h for h, _ in ranked[:TOP_K]]
+            scores = [s for _, s in ranked[:TOP_K]]
+        else:
+            scores = [h.get("score", 0.0) for h in hits]
     else:
         # 2. Embed question (possibly transformed)
         q_vec = embed(embed_text)[0]
 
-        # 3. Hybrid search — fetch larger candidate pool for re-ranking
+        # 3. Hybrid search — determine candidate pool size
+        lang = detect_language(question)
+        do_rerank = lang not in ('ar', 'fr')
+        k = TOP_K_RERANK if do_rerank else TOP_K
         sparse_query = bm25.encode_query(question)
         hits = col.search_hybrid(
             dense_query=q_vec.tolist(),
             sparse_query=sparse_query,
-            k=TOP_K_RERANK,
+            k=k,
             dense_weight=HYBRID_DENSE_WEIGHT,
             sparse_weight=HYBRID_SPARSE_WEIGHT,
         )
 
-        # 4. Cross-encoder re-ranking (ALWAYS with ORIGINAL question)
-        texts = [hit["payload"]["text"] for hit in hits]
-        ce_scores = rerank(question, texts)
-        ranked = sorted(zip(hits, ce_scores), key=lambda x: x[1], reverse=True)
-        hits = [h for h, _ in ranked[:TOP_K]]
-        scores = [s for _, s in ranked[:TOP_K]]
+        # 4. Cross-encoder re-ranking (skip for non-English)
+        if do_rerank:
+            texts = [hit["payload"]["text"] for hit in hits]
+            ce_scores = rerank(question, texts)
+            ranked = sorted(zip(hits, ce_scores), key=lambda x: x[1], reverse=True)
+            hits = [h for h, _ in ranked[:TOP_K]]
+            scores = [s for _, s in ranked[:TOP_K]]
+        else:
+            scores = [h.get("score", 0.0) for h in hits]
 
     # 5. Build context from re-ranked results
     context_parts: list[str] = []

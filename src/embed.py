@@ -11,7 +11,7 @@ def embed(texts: str | list[str]) -> np.ndarray:
     resp = requests.post(
         f"{OLLAMA_BASE_URL}/api/embed",
         json={"model": OLLAMA_EMBEDDING_MODEL, "input": texts},
-        timeout=60,
+        timeout=300,
     )
     resp.raise_for_status()
     data = resp.json()
