@@ -68,7 +68,7 @@ def handle_eval(args):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Simple RAG system")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
 
     ingest_parser = subparsers.add_parser("ingest", help="Ingest a text document or web URL")
     ingest_parser.add_argument(
@@ -110,6 +110,10 @@ def main() -> None:
     crawl_parser.add_argument("--force", action="store_true", help="Re-crawl already ingested URLs")
 
     args = parser.parse_args()
+
+    if args.command is None:
+        parser.print_help()
+        return
 
     if args.command == "ingest":
         if args.status:

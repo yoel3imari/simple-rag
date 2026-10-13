@@ -5,6 +5,7 @@ services:
     shm_size: 1g
     stdin_open: true
     tty: true
+    command: ["tail", "-f", "/dev/null"]
     environment:
       # Default: host.docker.internal works on macOS Docker Desktop.
       # For Linux, override with: OLLAMA_BASE_URL=http://172.17.0.1:11434
